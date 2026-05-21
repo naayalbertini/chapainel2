@@ -117,7 +117,7 @@ button:hover{transform:translateY(-1px);opacity:.95}
 table{
   width:100%;
   border-collapse:collapse;
-  min-width:800px;
+  min-width:920px;
 }
 
 th,td{
@@ -219,7 +219,8 @@ th{
           <tr>
             <th>Nome</th>
             <th>Presença</th>
-            <th>Presente/Fralda</th>
+            <th>Fralda</th>
+            <th>Item especial</th>
             <th>Observação</th>
             <th>Data</th>
             <th>Ação</th>
@@ -261,7 +262,17 @@ const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
 const limites = { P: 11, M: 8, G: 20 };
+const presentesEspeciais = {
+  "lixeira": "Lixeira anti odor rosa ou branca",
+  "baba-eletronica": "Babá eletrônica",
+  "mamadeira-avent": "Mamadeira Philips Avent",
+  "ruido-branco": "Aparelho de ruído branco",
+  "sabonete-mustela": "Sabonete líquido Mustela Gel Lavante",
+  "hidratante-mustela": "Hidratante corporal Mustela",
+  "pomada-assadura": "Pomada para assadura: Bepantol Baby ou Bepantriz"
+};
 const controleRef = doc(db, "controle", "fraldas");
+const controlePresentesRef = doc(db, "controle", "presentes");
 
 let dados = [];
 let filtroAtual = "Todos";
@@ -276,6 +287,13 @@ async function criarControleSeNaoExistir() {
   const snap = await getDoc(controleRef);
   if (!snap.exists()) {
     await setDoc(controleRef, { P: 0, M: 0, G: 0 });
+  }
+
+  const presentesSnap = await getDoc(controlePresentesRef);
+  if (!presentesSnap.exists()) {
+    const inicial = {};
+    Object.keys(presentesEspeciais).forEach(id => inicial[id] = 0);
+    await setDoc(controlePresentesRef, inicial);
   }
 }
 
@@ -318,7 +336,11 @@ function atualizarResumo() {
   const total = dados.length;
   const sim = dados.filter(item => item.presenca === "Sim").length;
   const nao = dados.filter(item => item.presenca === "Não").length;
-  const presentes = dados.filter(item => item.fralda && item.fralda !== "Não informado").length;
+  const presentes = dados.filter(item =>
+    (item.fralda && item.fralda !== "Não informado") ||
+    (item.presenteEspecialNome && item.presenteEspecialNome !== "Não informado") ||
+    (item.presente && item.presente !== "Não informado")
+  ).length;
 
   document.getElementById("total").innerText = total;
   document.getElementById("sim").innerText = sim;
@@ -343,6 +365,34 @@ function formatarData(timestamp) {
   }
 }
 
+function formatarFralda(item) {
+  if (item.fraldaNome && item.fraldaNome !== "Não informado") return item.fraldaNome;
+  if (item.fralda && item.fralda !== "Não informado") {
+    return item.fralda.startsWith("Fralda") ? item.fralda : `Fralda ${item.fralda}`;
+  }
+  return "-";
+}
+
+function formatarItemEspecial(item) {
+  if (item.presenteEspecialNome && item.presenteEspecialNome !== "Não informado") return item.presenteEspecialNome;
+  if (item.presente && item.presente !== "Não informado") return item.presente;
+  if (item.presenteId && presentesEspeciais[item.presenteId]) return presentesEspeciais[item.presenteId];
+  return "-";
+}
+
+function normalizarFraldaParaEstoque(valor) {
+  if (!valor || valor === "Não informado") return "";
+  if (["P", "M", "G"].includes(valor)) return valor;
+  const achou = String(valor).match(/(P|M|G)/i);
+  return achou ? achou[1].toUpperCase() : "";
+}
+
+function normalizarPresenteParaEstoque(item) {
+  if (item.presenteId && presentesEspeciais[item.presenteId]) return item.presenteId;
+  const nome = item.presenteEspecialNome || item.presente || "";
+  return Object.keys(presentesEspeciais).find(id => presentesEspeciais[id] === nome) || "";
+}
+
 function renderizarTabela() {
   const tabela = document.getElementById("tabela");
   tabela.innerHTML = "";
@@ -353,7 +403,7 @@ function renderizarTabela() {
   }
 
   if (lista.length === 0) {
-    tabela.innerHTML = `<tr><td colspan="6">Nenhuma confirmação encontrada.</td></tr>`;
+    tabela.innerHTML = `<tr><td colspan="7">Nenhuma confirmação encontrada.</td></tr>`;
     return;
   }
 
@@ -362,7 +412,8 @@ function renderizarTabela() {
     tr.innerHTML = `
       <td>${item.nome || "-"}</td>
       <td class="${item.presenca === "Sim" ? "status-sim" : "status-nao"}">${item.presenca || "-"}</td>
-      <td>${item.fralda || "-"}</td>
+      <td>${formatarFralda(item)}</td>
+      <td>${formatarItemEspecial(item)}</td>
       <td>${item.observacao || "-"}</td>
       <td>${formatarData(item.criadoEm)}</td>
       <td><button class="btn-excluir" onclick="excluirConfirmacao('${item.id}')">Excluir</button></td>
@@ -384,17 +435,27 @@ window.excluirConfirmacao = async function(id) {
     const confirmacaoRef = doc(db, "confirmacoes", id);
 
     await runTransaction(db, async (transaction) => {
+      // No Firestore, todas as leituras da transação precisam vir antes das gravações.
       const confirmacaoSnap = await transaction.get(confirmacaoRef);
+      const controleSnap = await transaction.get(controleRef);
+      const presentesSnap = await transaction.get(controlePresentesRef);
+
       if (!confirmacaoSnap.exists()) return;
 
       const item = confirmacaoSnap.data();
-      const fralda = item.fralda;
+      const fralda = normalizarFraldaParaEstoque(item.fralda);
+      const presenteId = normalizarPresenteParaEstoque(item);
+      const controle = controleSnap.exists() ? controleSnap.data() : { P: 0, M: 0, G: 0 };
+      const controlePresentes = presentesSnap.exists() ? presentesSnap.data() : {};
 
       if (["P", "M", "G"].includes(fralda)) {
-        const controleSnap = await transaction.get(controleRef);
-        const controle = controleSnap.exists() ? controleSnap.data() : { P: 0, M: 0, G: 0 };
         const atual = controle[fralda] || 0;
-        transaction.set(controleRef, { ...controle, [fralda]: Math.max(atual - 1, 0) }, { merge: true });
+        transaction.set(controleRef, { [fralda]: Math.max(atual - 1, 0) }, { merge: true });
+      }
+
+      if (presenteId) {
+        const atualPresente = controlePresentes[presenteId] || 0;
+        transaction.set(controlePresentesRef, { [presenteId]: Math.max(atualPresente - 1, 0) }, { merge: true });
       }
 
       transaction.delete(confirmacaoRef);
@@ -406,10 +467,10 @@ window.excluirConfirmacao = async function(id) {
 };
 
 window.exportarCSV = function() {
-  let csv = "Nome;Presença;Presente/Fralda;Observação;Data\n";
+  let csv = "Nome;Presença;Fralda;Item especial;Observação;Data\n";
 
   dados.forEach(item => {
-    csv += `"${item.nome || ""}";"${item.presenca || ""}";"${item.fralda || ""}";"${item.observacao || ""}";"${formatarData(item.criadoEm)}"\n`;
+    csv += `"${item.nome || ""}";"${item.presenca || ""}";"${formatarFralda(item)}";"${formatarItemEspecial(item)}";"${item.observacao || ""}";"${formatarData(item.criadoEm)}"\n`;
   });
 
   const blob = new Blob(["\uFEFF" + csv], { type:"text/csv;charset=utf-8;" });
